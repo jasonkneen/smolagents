@@ -19,7 +19,7 @@ import pickle
 import re
 import textwrap
 from io import BytesIO
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from PIL import Image
 
@@ -37,17 +37,20 @@ except ModuleNotFoundError:
 
 
 class E2BExecutor:
-    def __init__(self, additional_imports: List[str], tools: List[Tool], logger):
+    def __init__(self, additional_imports: List[str], logger):
+        self.logger = logger
         try:
             from e2b_code_interpreter import Sandbox
         except ModuleNotFoundError:
             raise ModuleNotFoundError(
                 """Please install 'e2b' extra to use E2BExecutor: `pip install "smolagents[e2b]"`"""
             )
+        self.logger = logger
+        self.logger.log("Initializing E2B executor, hold on...")
 
         self.custom_tools = {}
         self.final_answer = False
-        self.final_answer_pattern = re.compile(r"^final_answer\((.*)\)$")
+        self.final_answer_pattern = re.compile(r"final_answer\((.*?)\)")
         self.sbx = Sandbox()  # "qywp2ctmu2q7jzprcf4j")
         # TODO: validate installing agents package or not
         # print("Installing agents package on remote executor...")
@@ -56,7 +59,6 @@ class E2BExecutor:
         #     timeout=300
         # )
         # print("Installation of agents package finished.")
-        self.logger = logger
         additional_imports = additional_imports + ["smolagents"]
         if len(additional_imports) > 0:
             execution = self.sbx.commands.run("pip install " + " ".join(additional_imports))
@@ -65,8 +67,25 @@ class E2BExecutor:
             else:
                 logger.log(f"Installation of {additional_imports} succeeded!", 0)
 
+    def run_code_raise_errors(self, code: str):
+        if self.final_answer_pattern.search(code) is not None:
+            self.final_answer = True
+        execution = self.sbx.run_code(
+            code,
+        )
+        if execution.error:
+            execution_logs = "\n".join([str(log) for log in execution.logs.stdout])
+            logs = execution_logs
+            logs += "Executing code yielded an error:"
+            logs += execution.error.name
+            logs += execution.error.value
+            logs += execution.error.traceback
+            raise ValueError(logs)
+        return execution
+
+    def update_tools(self, tools: Dict[str, Tool]):
         tool_codes = []
-        for tool in tools:
+        for tool in tools.values():
             validate_tool_attributes(tool.__class__, check_imports=False)
             tool_code = instance_to_source(tool, base_cls=Tool)
             tool_code = tool_code.replace("from smolagents.tools import Tool", "")
@@ -86,26 +105,10 @@ class E2BExecutor:
         )
         tool_definition_code += "\n\n".join(tool_codes)
 
-        tool_definition_execution = self.run_code_raise_errors(tool_definition_code)
-        self.logger.log(tool_definition_execution.logs)
+        execution = self.run_code_raise_errors(tool_definition_code)
+        self.logger.log(execution.logs)
 
-    def run_code_raise_errors(self, code: str):
-        if self.final_answer_pattern.match(code):
-            self.final_answer = True
-        execution = self.sbx.run_code(
-            code,
-        )
-        if execution.error:
-            execution_logs = "\n".join([str(log) for log in execution.logs.stdout])
-            logs = execution_logs
-            logs += "Executing code yielded an error:"
-            logs += execution.error.name
-            logs += execution.error.value
-            logs += execution.error.traceback
-            raise ValueError(logs)
-        return execution
-
-    def __call__(self, code_action: str, additional_args: dict) -> Tuple[Any, Any]:
+    def __call__(self, code_action: str, additional_args: Dict[str, Any]) -> Tuple[Any, Any]:
         if len(additional_args) > 0:
             # Pickle additional_args to server
             import tempfile
@@ -127,6 +130,7 @@ locals().update({key: value for key, value in pickle_dict.items()})
             self.logger.log(execution_logs, 1)
 
         execution = self.run_code_raise_errors(code_action)
+        self.logger.log(execution.logs)
         execution_logs = "\n".join([str(log) for log in execution.logs.stdout])
         if not execution.results:
             return None, execution_logs, self.final_answer
@@ -137,7 +141,7 @@ locals().update({key: value for key, value in pickle_dict.items()})
                         if getattr(result, attribute_name) is not None:
                             image_output = getattr(result, attribute_name)
                             decoded_bytes = base64.b64decode(image_output.encode("utf-8"))
-                            return Image.open(BytesIO(decoded_bytes)), execution_logs
+                            return Image.open(BytesIO(decoded_bytes)), execution_logs, self.final_answer
                     for attribute_name in [
                         "chart",
                         "data",
@@ -152,7 +156,9 @@ locals().update({key: value for key, value in pickle_dict.items()})
                     ]:
                         if getattr(result, attribute_name) is not None:
                             return getattr(result, attribute_name), execution_logs, self.final_answer
-            raise ValueError("No main result returned by executor!")
+            if self.final_answer:
+                raise ValueError("No main result returned by executor!")
+            return None, execution_logs, False
 
 
 __all__ = ["E2BExecutor"]
