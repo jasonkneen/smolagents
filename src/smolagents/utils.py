@@ -20,6 +20,7 @@ import importlib.metadata
 import importlib.util
 import inspect
 import json
+import os
 import re
 import textwrap
 import types
@@ -64,13 +65,26 @@ BASE_BUILTIN_MODULES = [
 ]
 
 
+def escape_code_brackets(text: str) -> str:
+    """Escapes square brackets in code segments while preserving Rich styling tags."""
+
+    def replace_bracketed_content(match):
+        content = match.group(1)
+        cleaned = re.sub(
+            r"bold|red|green|blue|yellow|magenta|cyan|white|black|italic|dim|\s|#[0-9a-fA-F]{6}", "", content
+        )
+        return f"\\[{content}\\]" if cleaned.strip() else f"[{content}]"
+
+    return re.sub(r"\[([^\]]*)\]", replace_bracketed_content, text)
+
+
 class AgentError(Exception):
     """Base class for other agent-related exceptions"""
 
     def __init__(self, message, logger: "AgentLogger"):
         super().__init__(message)
         self.message = message
-        logger.log(f"[bold red]{message}[/bold red]", level="ERROR")
+        logger.log_error(message)
 
     def dict(self) -> Dict[str, str]:
         return {"type": self.__class__.__name__, "message": str(self.message)}
@@ -162,7 +176,10 @@ def parse_code_blobs(code_blob: str) -> str:
         if "final" in code_blob and "answer" in code_blob:
             raise ValueError(
                 f"""
-The code blob is invalid, because the regex pattern {pattern} was not found in {code_blob=}. It seems like you're trying to return the final answer, you can do it as follows:
+Your code snippet is invalid, because the regex pattern {pattern} was not found in it.
+Here is your code snippet:
+{code_blob}
+It seems like you're trying to return the final answer, you can do it as follows:
 Code:
 ```py
 final_answer("YOUR FINAL ANSWER HERE")
@@ -170,7 +187,10 @@ final_answer("YOUR FINAL ANSWER HERE")
             )
         raise ValueError(
             f"""
-The code blob is invalid, because the regex pattern {pattern} was not found in {code_blob=}. Make sure to include code with the correct pattern, for instance:
+Your code snippet is invalid, because the regex pattern {pattern} was not found in it.
+Here is your code snippet:
+{code_blob}
+Make sure to include code with the correct pattern, for instance:
 Thoughts: Your thoughts
 Code:
 ```py
@@ -292,10 +312,12 @@ def instance_to_source(instance, base_cls=None):
 
     for name, value in class_attrs.items():
         if isinstance(value, str):
+            # multiline value
             if "\n" in value:
-                class_lines.append(f'    {name} = """{value}"""')
+                escaped_value = value.replace('"""', r"\"\"\"")  # Escape triple quotes
+                class_lines.append(f'    {name} = """{escaped_value}"""')
             else:
-                class_lines.append(f'    {name} = "{value}"')
+                class_lines.append(f"    {name} = {json.dumps(value)}")
         else:
             class_lines.append(f"    {name} = {repr(value)}")
 
@@ -408,3 +430,10 @@ def encode_image_base64(image):
 
 def make_image_url(base64_image):
     return f"data:image/png;base64,{base64_image}"
+
+
+def make_init_file(folder: str):
+    os.makedirs(folder, exist_ok=True)
+    # Create __init__
+    with open(os.path.join(folder, "__init__.py"), "w"):
+        pass
